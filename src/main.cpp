@@ -11,13 +11,23 @@
 #define MOTORBPWM 19
 #define MOTORAPWM 23
 
-int posA = 0;
-int posB = 0;
 int isMotorAInverted = 1; //1 for normal, -1 for inverted
 int isMotorBInverted = 1;
 int isMotorAEncoderReversed = 1; //1 for normal, -1 for reversed
 int isMotorBEncoderReversed = -1;
+float PPR = 7; // Pulses per revolution for the encoder
+float GearRatio = 1; // Gear ratio TODO: correct ratio
 
+long prevTime = 0;
+int prevPosA = 0;
+int prevPosB = 0;
+volatile int posA = 0;
+volatile int posB = 0;
+
+float vaFilt = 0;
+float vaPrev = 0;
+float vbFilt = 0;
+float vbPrev = 0;
 
 void setMotor(int dir, int pwmval, int pwm, int in1, int in2) {
     if (dir == 1) {
@@ -63,7 +73,6 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(ENCB1), readEncoderB, RISING);
     attachInterrupt(digitalPinToInterrupt(ENCA1), readEncoderA, RISING);
 
-
     // Init motor pins
     pinMode(MOTORBIN1, OUTPUT);
     pinMode(MOTORBIN2, OUTPUT);
@@ -82,10 +91,39 @@ void setup() {
 }
 
 void loop() {
-    setMotor(1 * isMotorBInverted, 25, MOTORBPWM, MOTORBIN1, MOTORBIN2);
-    setMotor(1 * isMotorAInverted, 25, MOTORAPWM, MOTORAIN1, MOTORAIN2);
-    Serial.print("Encoder A: ");
-    Serial.print(posA);
-    Serial.print(" | Encoder B: ");
-    Serial.println(posB);
-}
+    long currentTime = micros();
+    if (currentTime - prevTime < 10000) return;
+
+    int pwr = constrain((int)(255.0 / 3.0 * 3000000 / 1000000.0), 0, 255);
+    
+    setMotor(1 * isMotorBInverted, pwr, MOTORBPWM, MOTORBIN1, MOTORBIN2);
+    setMotor(1 * isMotorAInverted, pwr, MOTORAPWM, MOTORAIN1, MOTORAIN2);
+
+    int snapA, snapB;
+    noInterrupts();
+    snapA = posA;
+    snapB = posB;
+    interrupts();
+
+    float deltaTime = (currentTime - prevTime) / 1000000.0; // Convert to seconds
+    float velocityA = (snapA - prevPosA) / deltaTime / PPR * GearRatio * 60.0; // Speed in revolutions per second
+    float velocityB = (snapB - prevPosB) / deltaTime / PPR * GearRatio * 60.0;
+
+    prevPosA = snapA;
+    prevPosB = snapB;
+    prevTime = currentTime;
+
+    vaFilt = 0.854*vaFilt + 0.0728*velocityA + 0.0728*vaPrev;
+    vaPrev = velocityA;
+    vbFilt = 0.854*vbFilt + 0.0728*velocityB + 0.0728*vbPrev;
+    vbPrev = velocityB;
+
+    Serial.print(velocityA);
+    Serial.print(",");
+    Serial.print(vaFilt);
+    Serial.print(",");
+    Serial.print(velocityB);
+    Serial.print(",");
+    Serial.print(vbFilt);
+    Serial.println();
+} 
