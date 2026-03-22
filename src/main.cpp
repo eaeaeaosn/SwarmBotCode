@@ -21,9 +21,11 @@ int isMotorAEncoderReversed = 1; //1 for normal, -1 for reversed
 int isMotorBEncoderReversed = -1;
 float PPR = 7; // Pulses per revolution for the encoder
 float GearRatio = 1.0/385.0; // Gear ratio 
-float MaxRPM = 40.0; // Maximum RPM of the motor under 5V supply
+float MaxRPM = 33; // Maximum RPM of the motor under 5V supply 
+float WheelBase = 0.106; // Distance between the midpoints of two wheels in meters
+float WheelDiameter = 0.040; // Diameter of the wheel in meters
 
-// Control variables
+// Motor Control variables
 long prevTime = 0;
 int prevPosA = 0;
 int prevPosB = 0;
@@ -35,14 +37,19 @@ float vaPrev = 0;
 float vbFilt = 0;
 float vbPrev = 0;
 
+//Robot Control Variables
+float targetRPMA = 0;
+float targetRPMB = 0;
+
 // PID values
-float pa = 35.0;
-float ia = 20.0;
+float pa = 50.0;
+float ia = 25.0;
 float da = 0.8;
-float pb = 35.0;
-float ib = 20.0;
+float pb = 50.0;
+float ib = 25.0;
 float db = 0.8;
 
+float integralLimit = 255.0 / ia;
 float eintegralA = 0;
 float eintegralB = 0;
 float eprevA = 0;
@@ -106,6 +113,26 @@ void readEncoderB() {
     }
 }
 
+void drive(float v, float omega) {
+    float vL = v - omega * WheelBase / 2;
+    float vR = v + omega * WheelBase / 2;
+
+    float maxWheel = max(fabs(vL), fabs(vR));
+    float maxWheelSpeed = MaxRPM / 60.0 * PI * WheelDiameter;
+
+    if (maxWheel > maxWheelSpeed) {
+        float scale = maxWheelSpeed / maxWheel;
+        vL *= scale;
+        vR *= scale;
+    }
+
+    float rpmL = vL / (PI * WheelDiameter) * 60.0;
+    float rpmR = vR / (PI * WheelDiameter) * 60.0;
+
+    targetRPMA = rpmL;
+    targetRPMB = rpmR;
+}
+
 
 void setup() {
     Serial.begin(115200);
@@ -150,6 +177,19 @@ void loop() {
     }
 
     long currentTime = micros();
+
+    //sine wave to tune pid
+    // float targetRPM = 30.0 * sin(currentTime / 1000000.0); 
+    // targetRPMA = targetRPM;
+    // targetRPMB = targetRPM;
+
+    //testing speed limiting
+    // if ((currentTime / 5000000) % 2 == 0) { 
+    //     drive(0.05, 0.5);
+    // } else {
+    //     drive(0.1, 1.0);
+    // }
+
     if (currentTime - prevTime < 10000) return;
 
     // Read encoder values and calculate velocities
@@ -174,15 +214,14 @@ void loop() {
     vbPrev = velocityB;
 
     // PID
-    float targetVelocityA = 30*(sin(currentTime / 1000000.0) > 0);
-    float targetVelocityB = 30*(sin(currentTime / 1000000.0) > 0);
-
-    float ea = targetVelocityA - vaFilt;
+    float ea = targetRPMA - vaFilt;
     eintegralA = eintegralA + ea * deltaTime;
+    eintegralA = constrain(eintegralA, -integralLimit, integralLimit);
     float ederivativeA = (ea - eprevA) / deltaTime;
     eprevA = ea;
-    float eb = targetVelocityB - vbFilt;
+    float eb = targetRPMB - vbFilt;
     eintegralB = eintegralB + eb * deltaTime;
+    eintegralB = constrain(eintegralB, -integralLimit, integralLimit);
     float ederivativeB = (eb - eprevB) / deltaTime;
     eprevB = eb;
 
@@ -208,11 +247,11 @@ void loop() {
     setMotor(dirA * isMotorAReversed, pwrA, MOTORAPWM, MOTORAIN1, MOTORAIN2);
     setMotor(dirB * isMotorBReversed, pwrB, MOTORBPWM, MOTORBIN1, MOTORBIN2);
 
-    Serial.print(targetVelocityA);
+    Serial.print(targetRPMA);
     Serial.print(",");
     Serial.print(vaFilt);
     Serial.print(",");
-    Serial.print(targetVelocityB);
+    Serial.print(targetRPMB);
     Serial.print(",");
     Serial.print(vbFilt);
     Serial.println();
