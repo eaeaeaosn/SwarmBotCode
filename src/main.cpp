@@ -1,5 +1,11 @@
 #include <Arduino.h>
 #include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <micro_ros_platformio.h>
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <geometry_msgs/msg/twist.h>
 
 #define ENCB1 34
 #define ENCB2 35
@@ -11,8 +17,6 @@
 #define MOTORAIN2 4
 #define MOTORBPWM 19
 #define MOTORAPWM 23
-
-BluetoothSerial SerialBT;
 
 // Mechanical config
 int isMotorAReversed = 1; //1 for normal, -1 for reversed
@@ -55,31 +59,21 @@ float eintegralB = 0;
 float eprevA = 0;
 float eprevB = 0;
 
-// Bluetooth PID tuning
-String input = "";
+// Microros variables
+rcl_allocator_t allocator;
+rclc_support_t support;
+rcl_node_t node;
+rclc_executor_t executor;
+rcl_subscription_t subscriber;
+geometry_msgs__msg__Twist msg;
 
-void processCommand(String cmd) {
-  if (cmd.startsWith("PA=")) {
-    pa = cmd.substring(3).toFloat();
-  }
-  else if (cmd.startsWith("IA=")) {
-    ia = cmd.substring(3).toFloat();
-  }
-  else if (cmd.startsWith("DA=")) {
-    da = cmd.substring(3).toFloat();
-  }
-  else if (cmd.startsWith("PB=")) {
-    pb = cmd.substring(3).toFloat();
-  }
-  else if (cmd.startsWith("IB=")) {
-    ib = cmd.substring(3).toFloat();
-  }
-  else if (cmd.startsWith("DB=")) {
-    db = cmd.substring(3).toFloat();
-  }
+long lastPingTime = 0;
+bool agentConnected = true;
 
-  SerialBT.printf("Updated PID: PA=%.2f IA=%.2f DA=%.2f  PB=%.2f IB=%.2f DB=%.2f\n", pa, ia, da, pb, ib, db);
-}
+// Timeout
+long lastCmdTime = 0;
+bool cmdActive = false;
+const long CMD_TIMEOUT_US = 5000000;
 
 void setMotor(int dir, int pwmval, int pwm, int in1, int in2) {
     if (dir == 1) {
@@ -133,12 +127,31 @@ void drive(float v, float omega) {
     targetRPMB = rpmR;
 }
 
+void callback_robot_control(const void* msgin) {
+    const geometry_msgs__msg__Twist* twist = 
+        (const geometry_msgs__msg__Twist*) msgin;
+    drive(twist->linear.x, twist->angular.z);
+    lastCmdTime = micros();  
+    cmdActive = true; 
+}
+
 
 void setup() {
     Serial.begin(115200);
 
-    SerialBT.begin("ESP32_PID"); // Bluetooth name
-    Serial.println("Ready for PID tuning...");
+    IPAddress agent_ip;
+    agent_ip.fromString("192.168.50.181"); 
+    set_microros_wifi_transports("ASUS_50", "autumn_3269", agent_ip, 8888);
+    delay(2000);
+
+    allocator = rcl_get_default_allocator();
+    rclc_support_init(&support, 0, NULL, &allocator);
+    rclc_node_init_default(&node, "robot1", "", &support);
+    rclc_subscription_init_default(&subscriber, &node, 
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel");
+    rclc_executor_init(&executor, &support.context, 1, &allocator);
+    rclc_executor_add_subscription(&executor, &subscriber, &msg, 
+        &callback_robot_control, ON_NEW_DATA);
 
     // Init encoder pins
     pinMode(ENCB1, INPUT);
@@ -166,29 +179,36 @@ void setup() {
 }
 
 void loop() {
-    while (SerialBT.available()) {
-        char c = SerialBT.read();
-        if (c == '\n') {
-        processCommand(input);
-        input = "";
-        } else {
-        input += c;
-        }
-    }
-
     long currentTime = micros();
 
-    //sine wave to tune pid
+    // sine wave to tune pid
     // float targetRPM = 30.0 * sin(currentTime / 1000000.0); 
     // targetRPMA = targetRPM;
     // targetRPMB = targetRPM;
 
-    //testing speed limiting
+    // testing speed limiting
     // if ((currentTime / 5000000) % 2 == 0) { 
     //     drive(0.05, 0.5);
     // } else {
     //     drive(0.1, 1.0);
     // }
+
+    // agent disconnect safety
+    if (currentTime - lastPingTime > 500000) {  // 每500ms ping一次
+    agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
+    lastPingTime = currentTime;
+    }
+    if (!agentConnected) {
+        drive(0, 0);
+        return;
+    }
+    
+    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
+
+    if (cmdActive && (micros() - lastCmdTime > CMD_TIMEOUT_US)) {
+    drive(0, 0);
+    cmdActive = false;
+}
 
     if (currentTime - prevTime < 10000) return;
 
@@ -214,6 +234,7 @@ void loop() {
     vbPrev = velocityB;
 
     // PID
+    float integralLimit = 255.0 / ia;
     float ea = targetRPMA - vaFilt;
     eintegralA = eintegralA + ea * deltaTime;
     eintegralA = constrain(eintegralA, -integralLimit, integralLimit);
