@@ -17,6 +17,7 @@
 #define MOTORAIN2 4
 #define MOTORBPWM 19
 #define MOTORAPWM 23
+#define MOTOR_STBY 13
 
 // Mechanical config
 int isMotorAReversed = 1; //1 for normal, -1 for reversed
@@ -137,6 +138,9 @@ void callback_robot_control(const void* msgin) {
 
 
 void setup() {
+    pinMode(MOTOR_STBY, OUTPUT);
+    digitalWrite(MOTOR_STBY, LOW);
+
     Serial.begin(115200);
 
     IPAddress agent_ip;
@@ -152,6 +156,8 @@ void setup() {
     rclc_executor_init(&executor, &support.context, 1, &allocator);
     rclc_executor_add_subscription(&executor, &subscriber, &msg, 
         &callback_robot_control, ON_NEW_DATA);
+
+    digitalWrite(MOTOR_STBY, HIGH);
 
     // Init encoder pins
     pinMode(ENCB1, INPUT);
