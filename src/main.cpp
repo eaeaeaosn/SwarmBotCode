@@ -1,8 +1,8 @@
 #include <Arduino.h>
-#include "BluetoothSerial.h"
 #include <WiFi.h>
 #include <micro_ros_platformio.h>
 #include <FastLED.h>
+#include "config.h"
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
@@ -27,16 +27,16 @@
 #define COLOR_ORDER    GRB
 #define LED_BRIGHTNESS 180   // 0-255, caps peak current draw (~65 mA at 180 for 20 LEDs)
 
-// Mechanical config
-int isMotorAReversed = 1; //1 for normal, -1 for reversed
-int isMotorBReversed = 1;
-int isMotorAEncoderReversed = 1; //1 for normal, -1 for reversed
-int isMotorBEncoderReversed = -1;
-float PPR = 7; // Pulses per revolution for the encoder
-float GearRatio = 1.0/380.0; // Gear ratio 
-float MaxRPM = 33; // Maximum RPM of the motor under 5V supply 
-float WheelBase = 0.106; // Distance between the midpoints of two wheels in meters
-float WheelDiameter = 0.040; // Diameter of the wheel in meters
+// Mechanical config — values come from include/config.h
+int isMotorAReversed        = MOTOR_A_DIR;
+int isMotorBReversed        = MOTOR_B_DIR;
+int isMotorAEncoderReversed = ENC_A_DIR;
+int isMotorBEncoderReversed = ENC_B_DIR;
+float PPR           = CFG_PPR;
+float GearRatio     = CFG_GEAR_RATIO;
+float MaxRPM        = CFG_MAX_RPM;
+float WheelBase     = CFG_WHEEL_BASE;
+float WheelDiameter = CFG_WHEEL_DIAMETER;
 
 // Motor Control variables
 long prevTime = 0;
@@ -54,15 +54,14 @@ float vbPrev = 0;
 float targetRPMA = 0;
 float targetRPMB = 0;
 
-// PID values
-float pa = 50.0;
-float ia = 25.0;
-float da = 0.8;
-float pb = 50.0;
-float ib = 25.0;
-float db = 0.8;
+// PID values — from config.h
+float pa = CFG_PA;
+float ia = CFG_IA;
+float da = CFG_DA;
+float pb = CFG_PB;
+float ib = CFG_IB;
+float db = CFG_DB;
 
-float integralLimit = 255.0 / ia;
 float eintegralA = 0;
 float eintegralB = 0;
 float eprevA = 0;
@@ -77,11 +76,11 @@ rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
 
 long lastPingTime = 0;
-bool agentConnected = true;
+bool agentConnected = false;  // confirmed only after first successful ping
 
 // LED state
 CRGB leds[NUM_LEDS];
-CRGB robotColor = CRGB(0, 100, 255);  // ← change per robot (R, G, B)
+CRGB robotColor = CRGB(LED_R, LED_G, LED_B);  // identity color from config.h
 long lastLedUpdate = 0;
 const long LED_UPDATE_US = 20000;      // 50 Hz refresh
 
@@ -105,7 +104,7 @@ void updateLEDs(bool connected) {
     } else {
         // 2-second breathing cycle, minimum 5% brightness so color is always visible
         float t = micros() / 1000000.0f;
-        float brightness = (sinf(TWO_PI * t / 2.0f) + 1.0f) / 2.0f; // 0..1
+        float brightness = (sinf(2.0f * PI * t / 2.0f) + 1.0f) / 2.0f; // 0..1
         brightness = 0.05f + brightness * 0.95f;
         CRGB dimmed(
             (uint8_t)(robotColor.r * brightness),
@@ -185,13 +184,13 @@ void setup() {
     Serial.begin(115200);
 
     IPAddress agent_ip;
-    agent_ip.fromString("192.168.50.181"); 
-    set_microros_wifi_transports("ASUS_50", "autumn_3269", agent_ip, 8888);
+    agent_ip.fromString(AGENT_IP);
+    set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, agent_ip, AGENT_PORT);
     delay(2000);
 
     allocator = rcl_get_default_allocator();
     rclc_support_init(&support, 0, NULL, &allocator);
-    rclc_node_init_default(&node, "robot1", "", &support);
+    rclc_node_init_default(&node, ROBOT_NAME, "", &support);
     rclc_subscription_init_default(&subscriber, &node, 
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel");
     rclc_executor_init(&executor, &support.context, 1, &allocator);
@@ -248,7 +247,7 @@ void loop() {
     // }
 
     // agent disconnect safety
-    if (currentTime - lastPingTime > 500000) {  // 每500ms ping一次
+    if (currentTime - lastPingTime > 500000) {  // ping every 500ms
         agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
         lastPingTime = currentTime;
     }
@@ -267,9 +266,9 @@ void loop() {
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 
     if (cmdActive && (micros() - lastCmdTime > CMD_TIMEOUT_US)) {
-    drive(0, 0);
-    cmdActive = false;
-}
+        drive(0, 0);
+        cmdActive = false;
+    }
 
     if (currentTime - prevTime < 10000) return;
 
