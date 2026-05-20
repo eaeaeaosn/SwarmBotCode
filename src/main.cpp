@@ -2,6 +2,7 @@
 #include "BluetoothSerial.h"
 #include <WiFi.h>
 #include <micro_ros_platformio.h>
+#include <FastLED.h>
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
@@ -19,13 +20,20 @@
 #define MOTORAPWM 23
 #define MOTOR_STBY 13
 
+// LED config
+#define LED_PIN        16
+#define NUM_LEDS       20
+#define LED_TYPE       WS2812B
+#define COLOR_ORDER    GRB
+#define LED_BRIGHTNESS 180   // 0-255, caps peak current draw (~65 mA at 180 for 20 LEDs)
+
 // Mechanical config
 int isMotorAReversed = 1; //1 for normal, -1 for reversed
 int isMotorBReversed = 1;
 int isMotorAEncoderReversed = 1; //1 for normal, -1 for reversed
 int isMotorBEncoderReversed = -1;
 float PPR = 7; // Pulses per revolution for the encoder
-float GearRatio = 1.0/385.0; // Gear ratio 
+float GearRatio = 1.0/380.0; // Gear ratio 
 float MaxRPM = 33; // Maximum RPM of the motor under 5V supply 
 float WheelBase = 0.106; // Distance between the midpoints of two wheels in meters
 float WheelDiameter = 0.040; // Diameter of the wheel in meters
@@ -71,10 +79,43 @@ geometry_msgs__msg__Twist msg;
 long lastPingTime = 0;
 bool agentConnected = true;
 
+// LED state
+CRGB leds[NUM_LEDS];
+CRGB robotColor = CRGB(0, 100, 255);  // ← change per robot (R, G, B)
+long lastLedUpdate = 0;
+const long LED_UPDATE_US = 20000;      // 50 Hz refresh
+
 // Timeout
 long lastCmdTime = 0;
 bool cmdActive = false;
 const long CMD_TIMEOUT_US = 5000000;
+
+// Set this robot's unique identity color (call once in setup or from serial).
+// e.g. robot1=red(255,0,0)  robot2=green(0,255,0)  robot3=blue(0,0,255)
+void setRobotColor(uint8_t r, uint8_t g, uint8_t b) {
+    robotColor = CRGB(r, g, b);
+}
+
+// Call every loop iteration; handles both breathing and solid modes.
+// Breathing: slow sine-wave on brightness when agent is disconnected.
+// Solid:     full identity color when agent is connected.
+void updateLEDs(bool connected) {
+    if (connected) {
+        fill_solid(leds, NUM_LEDS, robotColor);
+    } else {
+        // 2-second breathing cycle, minimum 5% brightness so color is always visible
+        float t = micros() / 1000000.0f;
+        float brightness = (sinf(TWO_PI * t / 2.0f) + 1.0f) / 2.0f; // 0..1
+        brightness = 0.05f + brightness * 0.95f;
+        CRGB dimmed(
+            (uint8_t)(robotColor.r * brightness),
+            (uint8_t)(robotColor.g * brightness),
+            (uint8_t)(robotColor.b * brightness)
+        );
+        fill_solid(leds, NUM_LEDS, dimmed);
+    }
+    FastLED.show();
+}
 
 void setMotor(int dir, int pwmval, int pwm, int in1, int in2) {
     if (dir == 1) {
@@ -182,6 +223,13 @@ void setup() {
     digitalWrite(MOTORAIN1, LOW);
     digitalWrite(MOTORAIN2, LOW);
     digitalWrite(MOTORAPWM, LOW);
+
+    // Init LED strip — starts black, breathing begins in loop()
+    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
+           .setCorrection(TypicalLEDStrip);
+    FastLED.setBrightness(LED_BRIGHTNESS);
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
 }
 
 void loop() {
@@ -201,9 +249,16 @@ void loop() {
 
     // agent disconnect safety
     if (currentTime - lastPingTime > 500000) {  // 每500ms ping一次
-    agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
-    lastPingTime = currentTime;
+        agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
+        lastPingTime = currentTime;
     }
+
+    // LED: breathing when disconnected, solid when connected (50Hz update)
+    if (currentTime - lastLedUpdate >= LED_UPDATE_US) {
+        updateLEDs(agentConnected);
+        lastLedUpdate = currentTime;
+    }
+
     if (!agentConnected) {
         drive(0, 0);
         return;
