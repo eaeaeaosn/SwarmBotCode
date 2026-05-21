@@ -21,7 +21,8 @@
 #define MOTOR_STBY 13
 
 // LED config
-#define LED_PIN        1#define NUM_LEDS       22
+#define LED_PIN        16
+#define NUM_LEDS       22
 #define LED_TYPE       WS2812B
 #define COLOR_ORDER    GRB
 #define LED_BRIGHTNESS 180   // 0-255, caps peak current draw (~65 mA at 180 for 22 LEDs)
