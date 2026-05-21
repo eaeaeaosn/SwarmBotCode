@@ -21,11 +21,10 @@
 #define MOTOR_STBY 13
 
 // LED config
-#define LED_PIN        16
-#define NUM_LEDS       20
+#define LED_PIN        1#define NUM_LEDS       22
 #define LED_TYPE       WS2812B
 #define COLOR_ORDER    GRB
-#define LED_BRIGHTNESS 180   // 0-255, caps peak current draw (~65 mA at 180 for 20 LEDs)
+#define LED_BRIGHTNESS 180   // 0-255, caps peak current draw (~65 mA at 180 for 22 LEDs)
 
 // Mechanical config — values come from include/config.h
 int isMotorAReversed        = MOTOR_A_DIR;
@@ -74,6 +73,10 @@ rcl_node_t node;
 rclc_executor_t executor;
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
+
+// State machine for micro-ROS connection
+enum AgentState { WAITING_FOR_AGENT, AGENT_CONNECTED };
+AgentState agentState = WAITING_FOR_AGENT;
 
 long lastPingTime = 0;
 bool agentConnected = false;  // confirmed only after first successful ping
@@ -177,29 +180,47 @@ void callback_robot_control(const void* msgin) {
 }
 
 
+// Initialize micro-ROS entities (called once agent is found)
+bool initMicroROS() {
+    allocator = rcl_get_default_allocator();
+    if (RCL_RET_OK != rclc_support_init(&support, 0, NULL, &allocator)) return false;
+    if (RCL_RET_OK != rclc_node_init_default(&node, ROBOT_NAME, "", &support)) return false;
+    if (RCL_RET_OK != rclc_subscription_init_default(&subscriber, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+        "/" ROBOT_NAME "/cmd_vel")) return false;
+    if (RCL_RET_OK != rclc_executor_init(&executor, &support.context, 1, &allocator)) return false;
+    if (RCL_RET_OK != rclc_executor_add_subscription(&executor, &subscriber, &msg,
+        &callback_robot_control, ON_NEW_DATA)) return false;
+    return true;
+}
+
+// Destroy micro-ROS entities (called when agent disconnects)
+void destroyMicroROS() {
+    rcl_subscription_fini(&subscriber, &node);
+    rcl_node_fini(&node);
+    rclc_support_fini(&support);
+    rclc_executor_fini(&executor);
+}
+
 void setup() {
+    // ── 1. Serial（最先，方便调试）────────────────────────────────
+    Serial.begin(115200);
+    delay(200);  // 等串口稳定
+    Serial.println("[1] Boot start");
+
+    // ── 2. LED（在 WiFi 之前，给视觉反馈）────────────────────────
+    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
+           .setCorrection(TypicalLEDStrip);
+    FastLED.setBrightness(LED_BRIGHTNESS);
+    fill_solid(leds, NUM_LEDS, CRGB::White);  // 白色自检
+    FastLED.show();
+    Serial.println("[2] FastLED OK");
+
+    // ── 3. 电机 STBY 低（安全启动）───────────────────────────────
     pinMode(MOTOR_STBY, OUTPUT);
     digitalWrite(MOTOR_STBY, LOW);
 
-    Serial.begin(115200);
-
-    IPAddress agent_ip;
-    agent_ip.fromString(AGENT_IP);
-    set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, agent_ip, AGENT_PORT);
-    delay(2000);
-
-    allocator = rcl_get_default_allocator();
-    rclc_support_init(&support, 0, NULL, &allocator);
-    rclc_node_init_default(&node, ROBOT_NAME, "", &support);
-    rclc_subscription_init_default(&subscriber, &node, 
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel");
-    rclc_executor_init(&executor, &support.context, 1, &allocator);
-    rclc_executor_add_subscription(&executor, &subscriber, &msg, 
-        &callback_robot_control, ON_NEW_DATA);
-
-    digitalWrite(MOTOR_STBY, HIGH);
-
-    // Init encoder pins
+    // ── 4. 编码器引脚 & 中断────────────────────────────────────
     pinMode(ENCB1, INPUT);
     pinMode(ENCB2, INPUT);
     pinMode(ENCA1, INPUT);
@@ -207,28 +228,32 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(ENCB1), readEncoderB, RISING);
     attachInterrupt(digitalPinToInterrupt(ENCA1), readEncoderA, RISING);
 
-    // Init motor pins
-    pinMode(MOTORBIN1, OUTPUT);
-    pinMode(MOTORBIN2, OUTPUT);
-    pinMode(MOTORBPWM, OUTPUT);
-    pinMode(MOTORAIN1, OUTPUT);
-    pinMode(MOTORAIN2, OUTPUT);
-    pinMode(MOTORAPWM, OUTPUT);
+    // ── 5. 电机引脚────────────────────────────────────────────
+    pinMode(MOTORBIN1, OUTPUT); pinMode(MOTORBIN2, OUTPUT); pinMode(MOTORBPWM, OUTPUT);
+    pinMode(MOTORAIN1, OUTPUT); pinMode(MOTORAIN2, OUTPUT); pinMode(MOTORAPWM, OUTPUT);
+    digitalWrite(MOTORBIN1, LOW); digitalWrite(MOTORBIN2, LOW); digitalWrite(MOTORBPWM, LOW);
+    digitalWrite(MOTORAIN1, LOW); digitalWrite(MOTORAIN2, LOW); digitalWrite(MOTORAPWM, LOW);
 
-    // Ensure motors are off at startup
-    digitalWrite(MOTORBIN1, LOW);
-    digitalWrite(MOTORBIN2, LOW);
-    digitalWrite(MOTORBPWM, LOW);
-    digitalWrite(MOTORAIN1, LOW);
-    digitalWrite(MOTORAIN2, LOW);
-    digitalWrite(MOTORAPWM, LOW);
+    // ── 6. WiFi + micro-ROS transport（可能耗时，前面已有反馈）──
+    Serial.print("[3] Connecting WiFi: ");
+    Serial.println(WIFI_SSID);
+    fill_solid(leds, NUM_LEDS, CRGB::Yellow);  // 黄色 = 正在连接 WiFi
+    FastLED.show();
 
-    // Init LED strip — starts black, breathing begins in loop()
-    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
-           .setCorrection(TypicalLEDStrip);
-    FastLED.setBrightness(LED_BRIGHTNESS);
+    IPAddress agent_ip;
+    agent_ip.fromString(AGENT_IP);
+    set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, agent_ip, AGENT_PORT);
+
+    Serial.println("[4] WiFi transport ready");
+
+    // ── 7. 电机 STBY 拉高（WiFi 连上才开启）──────────────────────
+    digitalWrite(MOTOR_STBY, HIGH);
+
+    // 熄灭自检白灯，进入呼吸等待模式
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
+
+    Serial.println("[5] Setup done. Waiting for micro-ROS agent...");
 }
 
 void loop() {
@@ -246,23 +271,52 @@ void loop() {
     //     drive(0.1, 1.0);
     // }
 
-    // agent disconnect safety
-    if (currentTime - lastPingTime > 500000) {  // ping every 500ms
-        agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
-        lastPingTime = currentTime;
-    }
+    // ── State machine: WAITING_FOR_AGENT ↔ AGENT_CONNECTED ──────
+    if (agentState == WAITING_FOR_AGENT) {
+        // LED breathing first — before the blocking ping call
+        if (currentTime - lastLedUpdate >= LED_UPDATE_US) {
+            updateLEDs(false);
+            lastLedUpdate = currentTime;
+        }
 
-    // LED: breathing when disconnected, solid when connected (50Hz update)
-    if (currentTime - lastLedUpdate >= LED_UPDATE_US) {
-        updateLEDs(agentConnected);
-        lastLedUpdate = currentTime;
-    }
+        // Try to find the agent every 2 s (ping timeout 50 ms to minimise blocking)
+        if (currentTime - lastPingTime > 2000000) {
+            Serial.println("Pinging agent...");
+            if (RMW_RET_OK == rmw_uros_ping_agent(50, 1)) {
+                if (initMicroROS()) {
+                    agentState     = AGENT_CONNECTED;
+                    agentConnected = true;
+                    Serial.println("Agent connected — micro-ROS ready");
+                }
+            }
+            lastPingTime = currentTime;
+        }
 
-    if (!agentConnected) {
         drive(0, 0);
         return;
     }
-    
+
+    // agentState == AGENT_CONNECTED
+    // Ping every 500 ms; tear down if agent disappears
+    if (currentTime - lastPingTime > 500000) {
+        agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
+        if (!agentConnected) {
+            Serial.println("Agent lost — resetting micro-ROS");
+            destroyMicroROS();
+            agentState = WAITING_FOR_AGENT;
+            drive(0, 0);
+            lastPingTime = currentTime;
+            return;
+        }
+        lastPingTime = currentTime;
+    }
+
+    // LED: solid when connected (50Hz update)
+    if (currentTime - lastLedUpdate >= LED_UPDATE_US) {
+        updateLEDs(true);
+        lastLedUpdate = currentTime;
+    }
+
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 
     if (cmdActive && (micros() - lastCmdTime > CMD_TIMEOUT_US)) {
