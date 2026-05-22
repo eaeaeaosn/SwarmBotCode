@@ -7,6 +7,12 @@
 //  and adjust the values. Nothing else needs to change.
 // =============================================================
 
+// IDE fallback: IntelliSense doesn't receive -D from build flags.
+// This default is only active in the editor, never during real compilation.
+#ifndef ROBOT_ID
+#  define ROBOT_ID 1
+#endif
+
 // ── Robot 1 ──────────────────────────────────────────────────
 #if ROBOT_ID == 1
 
