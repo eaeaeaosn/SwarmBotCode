@@ -94,6 +94,11 @@ unsigned long lastCmdTime = 0;
 bool cmdActive = false;
 const unsigned long CMD_TIMEOUT_US = 5000000;
 
+// ── PID 离线调参模式 ──────────────────────────────────────────────
+// 定义此宏后：跳过 WiFi / micro-ROS，直接跑 PID + 正弦目标转速
+// 调参完毕后注释掉即可恢复正常联网模式
+#define PID_TEST
+
 // Set this robot's unique identity color (call once in setup or from serial).
 // e.g. robot1=red(255,0,0)  robot2=green(0,255,0)  robot3=blue(0,0,255)
 void setRobotColor(uint8_t r, uint8_t g, uint8_t b) {
@@ -237,6 +242,7 @@ void setup() {
     digitalWrite(MOTORAIN1, LOW); digitalWrite(MOTORAIN2, LOW); digitalWrite(MOTORAPWM, LOW);
 
     // ── 6. WiFi + micro-ROS transport（可能耗时，前面已有反馈）──
+#ifndef PID_TEST
     Serial.print("[3] Connecting WiFi: ");
     Serial.println(WIFI_SSID);
     fill_solid(leds, NUM_LEDS, CRGB::Yellow);  // 黄色 = 正在连接 WiFi
@@ -256,23 +262,27 @@ void setup() {
     FastLED.show();
 
     Serial.println("[5] Setup done. Waiting for micro-ROS agent...");
+#else
+    // PID_TEST 模式：跳过 WiFi，直接使能电机
+    digitalWrite(MOTOR_STBY, HIGH);
+    fill_solid(leds, NUM_LEDS, CRGB::Blue);  // 蓝色 = PID 测试模式
+    FastLED.show();
+    Serial.println("[3] PID_TEST mode — WiFi skipped, motors enabled");
+#endif
 }
 
 void loop() {
     unsigned long currentTime = micros();
 
-    // sine wave to tune pid
-    // float targetRPM = 30.0 * sin(currentTime / 1000000.0); 
-    // targetRPMA = targetRPM;
-    // targetRPMB = targetRPM;
-
-    // testing speed limiting
-    // if ((currentTime / 5000000) % 2 == 0) { 
-    //     drive(0.05, 0.5);
-    // } else {
-    //     drive(0.1, 1.0);
-    // }
-
+    // ── PID 测试模式：设置正弦目标，跳过状态机 ────────────────────
+#ifdef PID_TEST
+    {
+        // ±30 RPM 正弦波，周期 2π 秒（约 6.28 s）
+        float targetRPM = 20.0f * sinf(currentTime / 1000000.0f);
+        targetRPMA = targetRPM;
+        targetRPMB = targetRPM;
+    }
+#else
     // ── State machine: WAITING_FOR_AGENT ↔ AGENT_CONNECTED ──────
     if (agentState == WAITING_FOR_AGENT) {
         // LED breathing first — before the blocking ping call
@@ -337,6 +347,7 @@ void loop() {
         drive(0, 0);
         cmdActive = false;
     }
+#endif  // !PID_TEST
 
     if (currentTime - prevTime < 10000) return;
 
@@ -403,5 +414,9 @@ void loop() {
     Serial.print(targetRPMB);
     Serial.print(",");
     Serial.print(vbFilt);
+    Serial.print(",");
+    Serial.print(snapA);   // raw encoder A count — should change when motor A spins
+    Serial.print(",");
+    Serial.print(snapB);   // raw encoder B count — should change when motor B spins
     Serial.println();
 } 
