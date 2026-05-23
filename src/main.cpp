@@ -39,7 +39,7 @@ float WheelBase     = CFG_WHEEL_BASE;
 float WheelDiameter = CFG_WHEEL_DIAMETER;
 
 // Motor Control variables
-long prevTime = 0;
+unsigned long prevTime = 0;
 int prevPosA = 0;
 int prevPosB = 0;
 volatile int posA = 0;
@@ -79,19 +79,20 @@ geometry_msgs__msg__Twist msg;
 enum AgentState { WAITING_FOR_AGENT, AGENT_CONNECTED };
 AgentState agentState = WAITING_FOR_AGENT;
 
-long lastPingTime = 0;
-bool agentConnected = false;  // confirmed only after first successful ping
+unsigned long lastPingTime = 0;
+bool agentConnected = false;            // confirmed only after first successful ping
+uint8_t consecutivePingFailures = 0;   // hysteresis: disconnect only after 3 consecutive failures
 
 // LED state
 CRGB leds[NUM_LEDS];
 CRGB robotColor = CRGB(LED_R, LED_G, LED_B);  // identity color from config.h
-long lastLedUpdate = 0;
-const long LED_UPDATE_US = 20000;      // 50 Hz refresh
+unsigned long lastLedUpdate = 0;
+const unsigned long LED_UPDATE_US = 20000;      // 50 Hz refresh
 
 // Timeout
-long lastCmdTime = 0;
+unsigned long lastCmdTime = 0;
 bool cmdActive = false;
-const long CMD_TIMEOUT_US = 5000000;
+const unsigned long CMD_TIMEOUT_US = 5000000;
 
 // Set this robot's unique identity color (call once in setup or from serial).
 // e.g. robot1=red(255,0,0)  robot2=green(0,255,0)  robot3=blue(0,0,255)
@@ -258,7 +259,7 @@ void setup() {
 }
 
 void loop() {
-    long currentTime = micros();
+    unsigned long currentTime = micros();
 
     // sine wave to tune pid
     // float targetRPM = 30.0 * sin(currentTime / 1000000.0); 
@@ -298,16 +299,28 @@ void loop() {
     }
 
     // agentState == AGENT_CONNECTED
-    // Ping every 500 ms; tear down if agent disappears
+    // Ping every 500 ms; tear down only after 3 consecutive failures (tolerates WiFi jitter).
+    // rmw_uros_ping_agent(200, 3): 200 ms timeout per attempt × 3 attempts = up to 600 ms/cycle.
     if (currentTime - lastPingTime > 500000) {
-        agentConnected = (RMW_RET_OK == rmw_uros_ping_agent(100, 1));
-        if (!agentConnected) {
-            Serial.println("Agent lost — resetting micro-ROS");
-            destroyMicroROS();
-            agentState = WAITING_FOR_AGENT;
-            drive(0, 0);
-            lastPingTime = currentTime;
-            return;
+        bool pingOk = (RMW_RET_OK == rmw_uros_ping_agent(200, 3));
+        if (pingOk) {
+            consecutivePingFailures = 0;
+            agentConnected = true;
+        } else {
+            consecutivePingFailures++;
+            Serial.print("Ping failed (");
+            Serial.print(consecutivePingFailures);
+            Serial.println("/3)");
+            if (consecutivePingFailures >= 3) {
+                Serial.println("Agent lost — resetting micro-ROS");
+                agentConnected = false;
+                consecutivePingFailures = 0;
+                destroyMicroROS();
+                agentState = WAITING_FOR_AGENT;
+                drive(0, 0);
+                lastPingTime = currentTime;
+                return;
+            }
         }
         lastPingTime = currentTime;
     }

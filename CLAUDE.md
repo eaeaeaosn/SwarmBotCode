@@ -11,23 +11,27 @@ SwarmBot is an ESP32-based differential drive robot running **micro-ROS over WiF
 This project uses **PlatformIO** (not Arduino IDE). All commands run from the project root.
 
 ```bash
-# Build
-pio run
+# Build + upload for a specific robot (Linux/macOS):
+ROBOT_ID=1 pio run -e swarmbot --target upload
+ROBOT_ID=2 pio run -e swarmbot --target upload
+ROBOT_ID=3 pio run -e swarmbot --target upload
 
-# Build + upload to connected ESP32
-pio run --target upload
+# Build + upload for a specific robot (PowerShell):
+$env:ROBOT_ID=1; pio run -e swarmbot --target upload
+$env:ROBOT_ID=2; pio run -e swarmbot --target upload
 
-# Serial monitor (115200 baud)
+# Serial monitor (115200 baud):
 pio device monitor
 
-# Build + upload + monitor in one step
-pio run --target upload && pio device monitor
+# Build + upload + monitor in one step (Linux/macOS):
+ROBOT_ID=1 pio run -e swarmbot --target upload && pio device monitor
 
-# Clean build artifacts
+# Clean build artifacts:
 pio run --target clean
 ```
 
-The target board is `esp32dev` with Arduino framework and WiFi micro-ROS transport (`board_microros_transport = wifi`).
+The target board is `esp32dev` with Arduino framework and WiFi micro-ROS transport (`board_microros_transport = wifi`).  
+`ROBOT_ID` selects the per-robot config block in `include/config.h` (name, WiFi, agent IP, motor polarity, PID gains).
 
 ## Architecture
 
@@ -52,7 +56,7 @@ ROS 2 agent (PC)
 
 **Safety mechanisms:**
 - `CMD_TIMEOUT_US` (5 s) — stops robot if no new `cmd_vel` arrives
-- Agent ping every 500 ms — stops robot if micro-ROS agent disconnects
+- Agent ping every 500 ms (200 ms timeout × 3 attempts per ping; 3 **consecutive** failures required to disconnect) — stops robot if micro-ROS agent truly disconnects; tolerates normal WiFi jitter
 
 ### Hardware Pin Mapping
 
@@ -77,11 +81,13 @@ Interrupts fire on rising edge of CH1 (ENCA1/ENCB1); CH2 pin is read inside the 
 
 ### Network Config (update before flashing)
 
-WiFi SSID/password and agent IP are hardcoded in `setup()`:
+WiFi credentials and agent IP/port are defined **per-robot** in `include/config.h` (`WIFI_SSID`, `WIFI_PASS`, `AGENT_IP`, `AGENT_PORT`) and applied in `setup()` via:
 ```cpp
-set_microros_wifi_transports("ASUS_50", "autumn_3269", agent_ip, 8888);
+set_microros_wifi_transports(WIFI_SSID, WIFI_PASS, agent_ip, AGENT_PORT);
 ```
-Agent IP: `192.168.50.181`, port `8888`. The ROS 2 node name is `robot1`, topic is `/cmd_vel`.
+Default: agent IP `192.168.50.181`, port `8888`.  
+ROS 2 node name matches `ROBOT_NAME` from `config.h` (e.g., `robot1`).  
+Subscribed topic: `/<ROBOT_NAME>/cmd_vel` (e.g., `/robot1/cmd_vel`, `/robot2/cmd_vel`, …).
 
 ### IMU (currently disabled)
 
