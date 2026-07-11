@@ -7,6 +7,7 @@
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/float32_multi_array.h>
 
 #define ENCB1 34
 #define ENCB2 35
@@ -75,6 +76,11 @@ rclc_executor_t executor;
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist msg;
 
+// Real wheel-velocity feedback (RPM, output-shaft speed after gear ratio)
+rcl_publisher_t wheel_vel_publisher;
+std_msgs__msg__Float32MultiArray wheel_vel_msg;
+static float wheel_vel_data[2];   // [0] = wheel A (left), [1] = wheel B (right)
+
 // State machine for micro-ROS connection
 enum AgentState { WAITING_FOR_AGENT, AGENT_CONNECTED };
 AgentState agentState = WAITING_FOR_AGENT;
@@ -97,7 +103,7 @@ const unsigned long CMD_TIMEOUT_US = 5000000;
 // ── PID 离线调参模式 ──────────────────────────────────────────────
 // 定义此宏后：跳过 WiFi / micro-ROS，直接跑 PID + 正弦目标转速
 // 调参完毕后注释掉即可恢复正常联网模式
-#define PID_TEST
+//#define PID_TEST
 
 // Set this robot's unique identity color (call once in setup or from serial).
 // e.g. robot1=red(255,0,0)  robot2=green(0,255,0)  robot3=blue(0,0,255)
@@ -178,12 +184,21 @@ void drive(float v, float omega) {
     targetRPMB = rpmR;
 }
 
+// Clears accumulated integral error. Called whenever the setpoint changes
+// (new command, or a forced stop) so a stale windup from an unreachable
+// target can't keep driving the motors after the setpoint has moved on.
+void resetIntegrators() {
+    eintegralA = 0;
+    eintegralB = 0;
+}
+
 void callback_robot_control(const void* msgin) {
-    const geometry_msgs__msg__Twist* twist = 
+    const geometry_msgs__msg__Twist* twist =
         (const geometry_msgs__msg__Twist*) msgin;
     drive(twist->linear.x, twist->angular.z);
-    lastCmdTime = micros();  
-    cmdActive = true; 
+    resetIntegrators();
+    lastCmdTime = micros();
+    cmdActive = true;
 }
 
 
@@ -195,6 +210,12 @@ bool initMicroROS() {
     if (RCL_RET_OK != rclc_subscription_init_default(&subscriber, &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
         "/" ROBOT_NAME "/cmd_vel")) return false;
+    if (RCL_RET_OK != rclc_publisher_init_default(&wheel_vel_publisher, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "/" ROBOT_NAME "/wheel_vel")) return false;
+    wheel_vel_msg.data.data     = wheel_vel_data;
+    wheel_vel_msg.data.size     = 2;
+    wheel_vel_msg.data.capacity = 2;
     if (RCL_RET_OK != rclc_executor_init(&executor, &support.context, 1, &allocator)) return false;
     if (RCL_RET_OK != rclc_executor_add_subscription(&executor, &subscriber, &msg,
         &callback_robot_control, ON_NEW_DATA)) return false;
@@ -204,6 +225,7 @@ bool initMicroROS() {
 // Destroy micro-ROS entities (called when agent disconnects)
 void destroyMicroROS() {
     rcl_subscription_fini(&subscriber, &node);
+    rcl_publisher_fini(&wheel_vel_publisher, &node);
     rcl_node_fini(&node);
     rclc_support_fini(&support);
     rclc_executor_fini(&executor);
@@ -305,6 +327,7 @@ void loop() {
         }
 
         drive(0, 0);
+        resetIntegrators();
         return;
     }
 
@@ -328,6 +351,7 @@ void loop() {
                 destroyMicroROS();
                 agentState = WAITING_FOR_AGENT;
                 drive(0, 0);
+                resetIntegrators();
                 lastPingTime = currentTime;
                 return;
             }
@@ -345,6 +369,7 @@ void loop() {
 
     if (cmdActive && (micros() - lastCmdTime > CMD_TIMEOUT_US)) {
         drive(0, 0);
+        resetIntegrators();
         cmdActive = false;
     }
 #endif  // !PID_TEST
@@ -406,6 +431,14 @@ void loop() {
     }
     setMotor(dirA * isMotorAReversed, pwrA, MOTORAPWM, MOTORAIN1, MOTORAIN2);
     setMotor(dirB * isMotorBReversed, pwrB, MOTORBPWM, MOTORBIN1, MOTORBIN2);
+
+#ifndef PID_TEST
+    if (agentState == AGENT_CONNECTED) {
+        wheel_vel_data[0] = vaFilt;
+        wheel_vel_data[1] = vbFilt;
+        rcl_publish(&wheel_vel_publisher, &wheel_vel_msg, NULL);
+    }
+#endif
 
     Serial.print(targetRPMA);
     Serial.print(",");
